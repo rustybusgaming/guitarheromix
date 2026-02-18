@@ -1407,6 +1407,11 @@ bool GSDevice12::CheckFeatures(const u32& vendor_id)
 		DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allow_tearing_supported, sizeof(allow_tearing_supported));
 	m_allow_tearing_supported = (SUCCEEDED(hr) && allow_tearing_supported == TRUE);
 
+	D3D12_FEATURE_DATA_D3D12_OPTIONS3 device_options3 = {};
+	hr = m_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3, &device_options3, sizeof(device_options3));
+	m_typed_casting_supported = SUCCEEDED(hr) && device_options3.CastingFullyTypedFormatSupported;
+	Console.WriteLnFmt("D3D12: Casting Fully Typed Formats: {}", m_typed_casting_supported ? "Supported" : "Not Supported");
+
 	D3D12_FEATURE_DATA_D3D12_OPTIONS12 device_options12 = {};
 	hr = m_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS12, &device_options12, sizeof(device_options12));
 	if (SUCCEEDED(hr))
@@ -1470,7 +1475,7 @@ void GSDevice12::LookupNativeFormat(GSTexture::Format format, DXGI_FORMAT* d3d_f
 
 	const auto& mapping = s_format_mapping[static_cast<int>(format)];
 	if (d3d_format)
-		*d3d_format = mapping[0];
+		*d3d_format = (format == GSTexture::Format::DepthStencil && !m_typed_casting_supported) ? DXGI_FORMAT_R32G8X24_TYPELESS : mapping[0];
 	if (srv_format)
 		*srv_format = mapping[1];
 	if (rtv_format)
@@ -1743,6 +1748,8 @@ void GSDevice12::DrawMultiStretchRects(
 void GSDevice12::DoMultiStretchRects(
 	const MultiStretchRect* rects, u32 num_rects, GSTexture12* dTex, ShaderConvert shader)
 {
+	g_perfmon.Put(GSPerfMon::TextureCopies, 1);
+
 	// Set up vertices first.
 	const u32 vertex_reserve_size = num_rects * 4 * sizeof(GSVertexPT1);
 	const u32 index_reserve_size = num_rects * 6 * sizeof(u16);
@@ -1880,6 +1887,8 @@ void GSDevice12::DoStretchRect(GSTexture12* sTex, const GSVector4& sRect, GSText
 
 void GSDevice12::DrawStretchRect(const GSVector4& sRect, const GSVector4& dRect, const GSVector2i& ds)
 {
+	g_perfmon.Put(GSPerfMon::TextureCopies, 1);
+
 	// ia
 	const float left = dRect.x * 2 / ds.x - 1.0f;
 	const float top = 1.0f - dRect.y * 2 / ds.y;
@@ -3048,6 +3057,7 @@ const ID3DBlob* GSDevice12::GetTFXPixelShader(const GSHWDrawConfig::PSSelector& 
 
 	ShaderMacro sm;
 	sm.AddMacro("PIXEL_SHADER", 1);
+	sm.AddMacro("PS_HAS_CONSERVATIVE_DEPTH", 1);
 	sm.AddMacro("PS_FST", sel.fst);
 	sm.AddMacro("PS_WMS", sel.wms);
 	sm.AddMacro("PS_WMT", sel.wmt);
@@ -3900,6 +3910,8 @@ void GSDevice12::SetPSConstantBuffer(const GSHWDrawConfig::PSConstantBuffer& cb)
 
 void GSDevice12::SetupDATE(GSTexture* rt, GSTexture* ds, SetDATM datm, const GSVector4i& bbox)
 {
+	g_perfmon.Put(GSPerfMon::TextureCopies, 1);
+
 	GL_PUSH("SetupDATE {%d,%d} %dx%d", bbox.left, bbox.top, bbox.width(), bbox.height());
 
 	const GSVector2i size(ds->GetSize());
@@ -3932,6 +3944,8 @@ void GSDevice12::SetupDATE(GSTexture* rt, GSTexture* ds, SetDATM datm, const GSV
 
 GSTexture12* GSDevice12::SetupPrimitiveTrackingDATE(GSHWDrawConfig& config, PipelineSelector& pipe)
 {
+	g_perfmon.Put(GSPerfMon::TextureCopies, 1);
+
 	// How this is done:
 	// - can't put a barrier for the image in the middle of the normal render pass, so that's out
 	// - so, instead of just filling the int texture with INT_MAX, we sample the RT and use -1 for failing values
@@ -4078,7 +4092,6 @@ void GSDevice12::RenderHW(GSHWDrawConfig& config)
 			SetPipeline(m_colclip_finish_pipelines[pipe.ds].get());
 			SetUtilityTexture(colclip_rt, m_point_sampler_cpu);
 			DrawStretchRect(sRect, GSVector4(config.colclip_update_area), rtsize);
-			g_perfmon.Put(GSPerfMon::TextureCopies, 1);
 
 			Recycle(colclip_rt);
 			g_gs_device->SetColorClipTexture(nullptr);
@@ -4280,7 +4293,6 @@ void GSDevice12::RenderHW(GSHWDrawConfig& config)
 		const GSVector4 drawareaf = GSVector4((config.colclip_mode == GSHWDrawConfig::ColClipMode::ConvertOnly) ? GSVector4i::loadh(rtsize) : config.drawarea);
 		const GSVector4 sRect(drawareaf / GSVector4(rtsize.x, rtsize.y).xyxy());
 		DrawStretchRect(sRect, GSVector4(drawareaf), rtsize);
-		g_perfmon.Put(GSPerfMon::TextureCopies, 1);
 
 		GL_POP();
 
@@ -4358,7 +4370,6 @@ void GSDevice12::RenderHW(GSHWDrawConfig& config)
 			SetPipeline(m_colclip_finish_pipelines[pipe.ds].get());
 			SetUtilityTexture(colclip_rt, m_point_sampler_cpu);
 			DrawStretchRect(sRect, GSVector4(config.colclip_update_area), rtsize);
-			g_perfmon.Put(GSPerfMon::TextureCopies, 1);
 
 			Recycle(colclip_rt);
 			g_gs_device->SetColorClipTexture(nullptr);
